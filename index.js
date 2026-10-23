@@ -34,6 +34,57 @@ function extraerJson(texto) {
   return JSON.parse(limpio.slice(inicio, fin));
 }
 
+function mensajeLlegada(pedido) {
+  return `📦 *¡Tu paquete ya está en agencia SHALOM!*\n\nHola *${pedido.destinatario}*, te informamos que tu producto está listo para ser retirado.\n\n📋 *Datos de tu envío:*\n▫️ *Nro. Orden:* ${pedido.numero_orden}\n▫️ *Código:* ${pedido.codigo_orden}\n\n⚠️ *IMPORTANTE:* Para poder brindarte la clave de retiro, es necesario realizar el abono del saldo pendiente.\n_(Verificamos pagos de 8:00 AM a 6:00 PM. Fuera de este horario, se procesan al día siguiente)._\n\n⏳ Recuerda que tienes un plazo máximo de *2 días* para recogerlo. Pasado este tiempo, el producto retornará al almacén sin opción a reembolso.\n\n📍 *Rastrea tu pedido aquí:* https://rastrea.shalom.pe\n\n🙌🏼 ¡Gracias por confiar en nosotros!\n*(Si ya realizaste el pago, puedes omitir este mensaje).*`;
+}
+
+let rastreoEnCurso = false;
+
+async function chequearPedidosPendientes() {
+  if (rastreoEnCurso) {
+    console.log('Chequeo omitido: ya hay un rastreo en curso.');
+    return;
+  }
+
+  rastreoEnCurso = true;
+  console.log('--- Iniciando chequeo de pedidos pendientes ---');
+
+  let browser;
+  try {
+    const pedidos = await all(`SELECT * FROM pedidos WHERE estado != 'En destino'`);
+    if (!pedidos.length) return;
+
+    browser = await crearNavegador();
+
+    for (const pedido of pedidos) {
+      console.log(`Verificando orden: ${pedido.numero_orden}`);
+      const page = await browser.newPage();
+      try {
+        const nuevoEstado = await rastrearPedidoShalom(pedido.numero_orden, pedido.codigo_orden, page);
+
+        if (nuevoEstado && nuevoEstado !== pedido.estado) {
+          await run(`UPDATE pedidos SET estado = ? WHERE id = ?`, [nuevoEstado, pedido.id]);
+
+          if (nuevoEstado === 'En destino') {
+            await bot.telegram.sendMessage(pedido.chat_id, mensajeLlegada(pedido), {
+              parse_mode: 'Markdown',
+            });
+          }
+        }
+      } finally {
+        await page.close();
+      }
+
+      await dormir(3000);
+    }
+  } catch (err) {
+    console.error('Error en chequeo diario:', err.message || err);
+  } finally {
+    if (browser) await browser.close();
+    rastreoEnCurso = false;
+  }
+}
+
 bot.on('photo', async (ctx) => {
   await ctx.reply('⏳ Imagen en cola. Procesando de forma secuencial para no saturar la red...');
 
@@ -92,44 +143,9 @@ bot.on('photo', async (ctx) => {
   }).catch((err) => console.error('[ERROR EN COLA]:', err));
 });
 
-cron.schedule('0 15 * * *', async () => {
-  console.log('--- Iniciando chequeo diario de pedidos pendientes ---');
-
-  let browser;
-  try {
-    const pedidos = await all(`SELECT * FROM pedidos WHERE estado != 'En destino'`);
-    if (!pedidos.length) return;
-
-    browser = await crearNavegador();
-
-    for (const pedido of pedidos) {
-      console.log(`Verificando orden: ${pedido.numero_orden}`);
-      const page = await browser.newPage();
-      try {
-        const nuevoEstado = await rastrearPedidoShalom(pedido.numero_orden, pedido.codigo_orden, page);
-
-        if (nuevoEstado && nuevoEstado !== pedido.estado) {
-          await run(`UPDATE pedidos SET estado = ? WHERE id = ?`, [nuevoEstado, pedido.id]);
-
-          if (nuevoEstado === 'En destino') {
-            await bot.telegram.sendMessage(
-              pedido.chat_id,
-              `🎉 ¡Tu pedido ha llegado a destino!\n\n📦 Orden: ${pedido.numero_orden}\n🎯 Destinatario: ${pedido.destinatario}`
-            );
-          }
-        }
-      } finally {
-        await page.close();
-      }
-
-      await dormir(3000);
-    }
-  } catch (err) {
-    console.error('Error en chequeo diario:', err.message || err);
-  } finally {
-    if (browser) await browser.close();
-  }
-});
+const opcionesCron = { timezone: 'America/Lima' };
+cron.schedule('0 9 * * *', chequearPedidosPendientes, opcionesCron);
+cron.schedule('0 15 * * *', chequearPedidosPendientes, opcionesCron);
 
 bot.launch().then(() => {
   console.log('🤖 Bot en línea y listo para producción.');
