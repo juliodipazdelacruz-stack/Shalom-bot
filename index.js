@@ -30,8 +30,13 @@ bot.on('photo', async (ctx) => {
       const base64Data = Buffer.from(arrayBuffer).toString('base64');
       const imageUrl = `data:image/jpeg;base64,${base64Data}`;
 
-      const prompt = `Analiza esta guía de Shalom. Extrae únicamente estos 4 campos en formato JSON puro (sin texto adicional ni markdown). Las claves deben ser exactamente: numero_orden, codigo_orden, remitente, destinatario.`;
+      const prompt = `Analiza detalladamente esta guía de Shalom de arriba a abajo. Extrae únicamente estos 4 campos en formato JSON puro (sin texto adicional ni markdown). Las claves deben ser exactamente: numero_orden, codigo_orden, remitente, destinatario.
 
+      REGLAS CRÍTICAS DE EXTRACCIÓN:
+      1. NÚMERO DE ORDEN: Los números de orden de Shalom tienen una longitud fija y completa. Fíjate muy bien en los bordes y el final del texto impreso. ¡No omitas ningún dígito del final!
+      2. PRECISIÓN EN DÍGITOS (6 vs 8): En los tickets térmicos, los números "6" y "8" pueden parecerse por la borrosidad de la tinta. Analiza la estructura del carácter: si el círculo superior o inferior está abierto, es un 6; si está completamente sellado en ambos lados, es un 8. Evita confundir el 6 con el 8.
+      3. PEGADOS COMUNES: Si el número de orden y la palabra "CÓDIGO" están juntos (ej: "100070441CÓDIGO"), sepáralos correctamente e ignora la C
+      4. NOMBRES COMPLETOS: Extrae el nombre del remitente y del destinatario completos, sin recortar letras al final de las líneas.`;
       const chatCompletion = await groq.chat.completions.create({
         messages: [
           { role: "user", content: [{ type: "text", text: prompt }, { type: "image_url", image_url: { url: imageUrl } }] }
@@ -80,10 +85,9 @@ bot.on('photo', async (ctx) => {
   }).catch(err => console.error("[ERROR EN COLA]:", err));
 });
 
-// 2. Alarma Diaria para rastreo en web (Playwright)
-cron.schedule('0 15 * * *', async () => {
-  console.log('--- Iniciando chequeo diario de pedidos pendientes ---');
-
+async function procesarPedidosPendientes() {
+  console.log('--- Iniciando chequeo programado de pedidos ---');
+  
   db.all(`SELECT * FROM pedidos WHERE estado != 'En destino'`, async (err, pedidos) => {
     if (err) return console.error(err);
 
@@ -95,18 +99,21 @@ cron.schedule('0 15 * * *', async () => {
         db.run(`UPDATE pedidos SET estado = ? WHERE id = ?`, [nuevoEstado, pedido.id]);
 
         if (nuevoEstado === 'En destino') {
-          bot.telegram.sendMessage(
-            pedido.chat_id,
-            `🎉 ¡Tu pedido ha llegado a destino!\n\n📦 Orden: ${pedido.numero_orden}\n🎯 Destinatario: ${pedido.destinatario}`
-          );
+          const mensajeLlegada = `📦 *¡Tu paquete ya está en agencia SHALOM!*\n\nHola *${pedido.destinatario}*, te informamos que tu producto está listo para ser retirado.\n\n📋 *Datos de tu envío:*\n▫️ *Nro. Orden:* ${pedido.numero_orden}\n▫️ *Código:* ${pedido.codigo_orden}\n\n⚠️ *IMPORTANTE:* Para poder brindarte la clave de retiro, es necesario realizar el abono del saldo pendiente.\n_(Verificamos pagos de 8:00 AM a 6:00 PM. Fuera de este horario, se procesan al día siguiente)._\n\n⏳ Recuerda que tienes un plazo máximo de *2 días* para recogerlo. Pasado este tiempo, el producto retornará al almacén sin opción a reembolso.\n\n📍 *Rastrea tu pedido aquí:* https://rastrea.shalom.pe\n\n🙌🏼 ¡Gracias por confiar en nosotros!\n*(Si ya realizaste el pago, puedes omitir este mensaje).*`;
+
+          bot.telegram.sendMessage(pedido.chat_id, mensajeLlegada, { parse_mode: 'Markdown' });
         }
       }
-      
-      // Pausa de 3 segundos entre consultas web para no saturar a Shalom
-      await new Promise(resolve => setTimeout(resolve, 3000));
+      await new Promise(r => setTimeout(r, 3000));
     }
   });
-});
+}
+
+// Horario 1: Todos los días a las 10:30 AM
+cron.schedule('30 10 * * *', procesarPedidosPendientes);
+
+// Horario 2: Todos los días a las 3:00 PM (15:00)
+cron.schedule('0 15 * * *', procesarPedidosPendientes);
 
 // 3. Inicialización
 bot.launch().then(() => {
